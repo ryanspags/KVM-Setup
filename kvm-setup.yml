@@ -1,0 +1,180 @@
+---
+- name: KVM Host Setup
+  hosts: kvm_hosts
+  become: true
+  remote_user: rspagnola
+
+  vars:
+    bridge_name: bridge0
+    phys_iface: eno1
+
+  tasks:
+
+  - name: Install KVM and virtualization packages
+    dnf:
+      name:
+        - qemu-kvm
+        - libvirt
+        - virt-install
+        - edk2-ovmf
+        - swtpm
+        - qemu-img
+        - guestfs-tools
+        - libosinfo
+        - tuned
+        - libvirt-daemon-config-network
+        - cockpit-machines
+      state: latest
+      name:
+        - cockpit-podman
+      state: absent
+
+  - name: Add virtio-win repo
+    get_url:
+      url: https://fedorapeople.org/groups/virt/virtio-win/virtio-win.repo
+      dest: /etc/yum.repos.d/virtio-win.repo
+
+  - name: Install virtio-win
+    dnf:
+      name: virtio-win
+      state: present
+
+  - name: Enable libvirt services
+    systemd:
+      name: "virt{{ item }}"
+      enabled: yes
+    loop:
+      - qemud.service
+      - interfaced.service
+      - networkd.service
+      - nodedevd.service
+      - nwfilterd.service
+      - secretd.service
+      - storaged.service
+
+  - name: Enable tuned
+    systemd:
+      name: tuned
+      enabled: yes
+      state: started
+
+  - name: Set tuned profile
+    command: tuned-adm profile virtual-host
+
+  - name: Enable IOMMU in grub
+    lineinfile:
+      path: /etc/default/grub
+      regexp: '^GRUB_CMDLINE_LINUX='
+      line: 'GRUB_CMDLINE_LINUX="intel_iommu=on iommu=pt"'
+
+  - name: Regenerate grub config
+    command: grub2-mkconfig -o /boot/grub2/grub.cfg
+
+   # ---------------- Permissions ----------------
+
+  - name: Add user to libvirt group
+    user:
+      name: "{{ ansible_user }}"
+      groups: libvirt
+      append: yes
+
+  - name: Set default libvirt URI
+    lineinfile:
+      path: "/home/{{ ansible_user }}/.bashrc"
+      line: "export LIBVIRT_DEFAULT_URI='qemu:///system'"
+
+  - name: Set ACL on images directory
+    command: setfacl -R -m u:{{ ansible_user }}:rwX /var/lib/libvirt/images
+
+  - name: Set default ACL on images directory
+    command: setfacl -m d:u:{{ ansible_user }}:rwx /var/lib/libvirt/images
+
+  
+    # ---------------- Networking ----------------
+
+  - name: Create bridge
+    command: nmcli connection add type bridge con-name {{ bridge_name }} ifname {{ bridge_name }}
+    args:
+      creates: "/etc/NetworkManager/system-connections/{{ bridge_name }}.nmconnection"
+
+  - name: Add physical interface to bridge
+    command: nmcli connection add type ethernet slave-type bridge con-name "br-slave-{{ phys_iface }}" ifname {{ phys_iface }} master {{ bridge_name }}
+
+  - name: Configure bridge IP
+    command: >
+      nmcli connection modify {{ bridge_name }}
+      ipv4.addresses {{ bridge_ip }}
+      ipv4.gateway {{ bridge_gw }}
+      ipv4.dns {{ bridge_dns }}
+      ipv4.method manual
+
+  - name: Bring up bridge
+    command: nmcli connection up {{ bridge_name }}
+
+  - name: Autoconnect bridge slaves
+    command: nmcli connection modify {{ bridge_name }} connection.autoconnect-slaves 1
+
+   # ---------------- Permissions ----------------
+
+  - name: Add user to libvirt group
+    user:
+      name: "{{ ansible_user }}"
+      groups: libvirt
+      append: yes
+
+  - name: Set default libvirt URI
+    lineinfile:
+      path: "/home/{{ ansible_user }}/.bashrc"
+      line: "export LIBVIRT_DEFAULT_URI='qemu:///system'"
+
+  - name: Set ACL on images directory
+    command: setfacl -R -m u:{{ ansible_user }}:rwX /var/lib/libvirt/images
+
+  - name: Set default ACL on images directory
+    command: setfacl -m d:u:{{ ansible_user }}:rwx /var/lib/libvirt/images
+   
+
+  - name: Reboot the server and wait for it to restart
+    reboot:
+      msg: "Reboot initiated by Ansible"
+      connect_timeout: 5
+      reboot_timeout: 600
+      pre_reboot_delay: 0
+      post_reboot_delay: 30
+      test_command: whoami
+
+
+    # ---------------- libvirt network ----------------
+
+  - name: check if network exists
+    command: virsh net-info nwbridge
+    register: net_check
+    failed_when: false
+    changed_when: false
+
+  - name: Create nwbridge xml
+    copy:
+      dest: /tmp/nwbridge.xml
+      content: |
+        <network>
+          <name>nwbridge</name>
+          <forward mode='bridge'/>
+          <bridge name='{{ bridge_name }}'/>
+        </network>
+
+  - name: Define libvirt network if missing
+    command: virsh net-define /tmp/nwbridge.xml
+    when: net_check.rc != 0
+
+  - name: Start libvirt network
+    command: virsh net-start nwbridge
+    when: net_check.rc != 0
+
+  - name: Autostart libvirt network
+    command: virsh net-autostart nwbridge
+    when: net_check.rc != 0
+
+  - name: Remove nwbridge.xml file
+    ansible.builtin.file:
+      path: /tmp/nwbridge.xml
+      state: absent
