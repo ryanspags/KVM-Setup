@@ -2,7 +2,7 @@
 - name: KVM Host Setup
   hosts: kvm_hosts
   become: true
-  remote_user: rspagnola
+  remote_user: admin
 
   vars:
     bridge_name: bridge0
