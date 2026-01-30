@@ -9,7 +9,12 @@
     phys_iface: eno1
 
   tasks:
-
+  
+  - name: Ensure system is up to date
+    dnf:
+      name: "*"
+      state: latest
+  
   - name: Install KVM and virtualization packages
     dnf:
       name:
